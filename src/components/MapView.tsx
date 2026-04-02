@@ -78,6 +78,33 @@ export default function MapView({ points, onPointAdded }: Props) {
 
         map.setView([90, 0], 0);
 
+        // ── Lat/lon graticule ────────────────────────────────────────────────
+        const GRID = { color: "#ffffff", weight: 0.5, opacity: 0.25, interactive: false } as const;
+        const LABEL_STYLE = "color:rgba(255,255,255,0.5);font-size:10px;line-height:1;white-space:nowrap";
+        const graticule = L.layerGroup().addTo(map);
+        const outerLat = Math.ceil(minLat);
+
+        // Parallels — sampled every 2° of longitude to render as smooth arcs
+        for (let lat = Math.ceil(minLat / 10) * 10; lat < 90; lat += 10) {
+          const pts: L.LatLngExpression[] = [];
+          for (let lon = -180; lon <= 180; lon += 2) pts.push([lat, lon]);
+          L.polyline(pts, GRID).addTo(graticule);
+          L.marker([lat, 0] as L.LatLngExpression, {
+            interactive: false,
+            icon: L.divIcon({ html: `<span style="${LABEL_STYLE}">${lat}°</span>`, className: "", iconAnchor: [0, 6] }),
+          }).addTo(graticule);
+        }
+
+        // Meridians — straight in polar stereographic, so 2 points suffice
+        for (let crsLon = -180; crsLon < 180; crsLon += 30) {
+          L.polyline([[outerLat, crsLon], [89, crsLon]], GRID).addTo(graticule);
+          const userLon = ((180 - crsLon) % 360 + 360) % 360;
+          L.marker([outerLat + 2, crsLon] as L.LatLngExpression, {
+            interactive: false,
+            icon: L.divIcon({ html: `<span style="${LABEL_STYLE}">${userLon}°</span>`, className: "", iconAnchor: [12, 6] }),
+          }).addTo(graticule);
+        }
+
         // Click: proj4leaflet returns Jupiter geographic lat/lon directly in e.latlng
         map.on("click", async (e: L.LeafletMouseEvent) => {
           const { lat, lng } = e.latlng;
