@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Vite cache
+.vite/
+
+# TypeScript
+*.tsbuildinfo
+
+# Python
+server/__pycache__/
+server/.venv/
+server/*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# uv
+.python-version
+
+# Data (large files)
+data/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# data files
+*.tiff
+*.TIFF
+*.tif
+*.fits
