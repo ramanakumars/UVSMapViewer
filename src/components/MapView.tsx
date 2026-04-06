@@ -5,6 +5,7 @@ import proj4 from "proj4";
 import "proj4leaflet";
 import { fetchRasterInfo } from "../lib/api";
 import type { MapPoint, RasterInfo } from "../lib/api";
+import { useRasterContext } from "../contexts/rasterContext";
 
 interface Props {
   points: MapPoint[];
@@ -15,30 +16,49 @@ export default function MapView({ points, onPointAdded }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const maxZoomRef = useRef<number>(10);
   // Ref so the click handler always uses the latest callback without re-binding
   const onPointAddedRef = useRef(onPointAdded);
   useEffect(() => {
     onPointAddedRef.current = onPointAdded;
   }, [onPointAdded]);
 
+  const {
+    plotBand,
+    setRasterMinMax,
+    plotMin,
+    setPlotMin,
+    plotMax,
+    setPlotMax,
+  } = useRasterContext();
+
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
     let cancelled = false;
 
-    fetchRasterInfo()
+    fetchRasterInfo(plotBand)
       .then((info: RasterInfo) => {
         if (cancelled || !containerRef.current) return;
 
         // Register the projection so proj4leaflet can use it
         proj4.defs(info.crs_code, info.proj4str);
 
+        setRasterMinMax([info.min_val, info.max_val]);
+        setPlotMin(info.min_val);
+        setPlotMax(info.max_val);
+
         // Build a Leaflet CRS from the native raster projection
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const crs: L.CRS = new (L as any).Proj.CRS(info.crs_code, info.proj4str, {
-          origin: [info.xmin, info.ymax] as [number, number],
-          bounds: L.bounds([info.xmin, info.ymin], [info.xmax, info.ymax]),
-          resolutions: info.resolutions,
-        });
+        const crs: L.CRS = new (L as any).Proj.CRS(
+          info.crs_code,
+          info.proj4str,
+          {
+            origin: [info.xmin, info.ymax] as [number, number],
+            bounds: L.bounds([info.xmin, info.ymin], [info.xmax, info.ymax]),
+            resolutions: info.resolutions,
+          },
+        );
 
         // Compute geographic bounds for the north polar stereographic raster.
         // All 4 projected corners sit at nearly the same latitude (equidistant
@@ -47,40 +67,51 @@ export default function MapView({ points, onPointAdded }: Props) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const proj = (crs as any).projection;
         const corners = [
-          [info.xmin, info.ymin], [info.xmax, info.ymin],
-          [info.xmin, info.ymax], [info.xmax, info.ymax],
+          [info.xmin, info.ymin],
+          [info.xmax, info.ymin],
+          [info.xmin, info.ymax],
+          [info.xmax, info.ymax],
         ].map(([x, y]) => proj.unproject(L.point(x, y)));
         const minLat = Math.min(...corners.map((c) => c.lat));
-        const bounds = L.latLngBounds(L.latLng(minLat, -180), L.latLng(90, 180));
+        const bounds = L.latLngBounds(
+          L.latLng(minLat, -180),
+          L.latLng(90, 180),
+        );
 
         const map = L.map(containerRef.current!, {
           crs,
           minZoom: 2,
           maxZoom: info.resolutions.length - 1,
-          zoomControl: true,
+          zoomControl: false,
           center: [90, 0],
           attributionControl: false,
         });
 
-        console.log(bounds.getCenter())
-
+        L.control.zoom({ position: "bottomleft" }).addTo(map);
         map.getContainer().style.background = "#0a0a1a";
         markersLayerRef.current = L.layerGroup().addTo(map);
         mapRef.current = map;
 
-        L.tileLayer("/tiles/{z}/{x}/{y}.png", {
+        maxZoomRef.current = info.resolutions.length - 1;
+        tileLayerRef.current = L.tileLayer(`/tiles/{z}/{x}/{y}.png?band=${plotBand}&min_val=${plotMin}&max_val=${plotMax}`, {
           tileSize: 256,
           minZoom: 2,
           maxZoom: info.resolutions.length - 1,
           noWrap: true,
-          opacity: 1.,
+          opacity: 1,
         }).addTo(map);
 
         map.setView([90, 0], 0);
 
         // ── Lat/lon graticule ────────────────────────────────────────────────
-        const GRID = { color: "#ffffff", weight: 0.5, opacity: 0.25, interactive: false } as const;
-        const LABEL_STYLE = "color:rgba(255,255,255,0.5);font-size:10px;line-height:1;white-space:nowrap";
+        const GRID = {
+          color: "#ffffff",
+          weight: 0.5,
+          opacity: 0.25,
+          interactive: false,
+        } as const;
+        const LABEL_STYLE =
+          "color:rgba(255,255,255,0.5);font-size:10px;line-height:1;white-space:nowrap";
         const graticule = L.layerGroup().addTo(map);
         const outerLat = Math.ceil(minLat);
 
@@ -91,17 +122,31 @@ export default function MapView({ points, onPointAdded }: Props) {
           L.polyline(pts, GRID).addTo(graticule);
           L.marker([lat, 0] as L.LatLngExpression, {
             interactive: false,
-            icon: L.divIcon({ html: `<span style="${LABEL_STYLE}">${lat}°</span>`, className: "", iconAnchor: [0, 6] }),
+            icon: L.divIcon({
+              html: `<span style="${LABEL_STYLE}">${lat}°</span>`,
+              className: "",
+              iconAnchor: [0, 6],
+            }),
           }).addTo(graticule);
         }
 
         // Meridians — straight in polar stereographic, so 2 points suffice
         for (let crsLon = -180; crsLon < 180; crsLon += 30) {
-          L.polyline([[outerLat, crsLon], [89, crsLon]], GRID).addTo(graticule);
-          const userLon = ((180 - crsLon) % 360 + 360) % 360;
+          L.polyline(
+            [
+              [outerLat, crsLon],
+              [89, crsLon],
+            ],
+            GRID,
+          ).addTo(graticule);
+          const userLon = (((180 - crsLon) % 360) + 360) % 360;
           L.marker([outerLat + 2, crsLon] as L.LatLngExpression, {
             interactive: false,
-            icon: L.divIcon({ html: `<span style="${LABEL_STYLE}">${userLon}°</span>`, className: "", iconAnchor: [12, 6] }),
+            icon: L.divIcon({
+              html: `<span style="${LABEL_STYLE}">${userLon}°</span>`,
+              className: "",
+              iconAnchor: [12, 6],
+            }),
           }).addTo(graticule);
         }
 
@@ -116,19 +161,44 @@ export default function MapView({ points, onPointAdded }: Props) {
           } catch {
             // value stays null
           }
-          onPointAddedRef.current({ id: crypto.randomUUID(), lat, lng: 180 - lng, value });
+          onPointAddedRef.current({
+            id: crypto.randomUUID(),
+            lat,
+            lng: 180 - lng,
+            value,
+          });
         });
       })
       .catch((err) => {
-        if (!cancelled) console.error("[MapView] Failed to load raster info:", err);
+        if (!cancelled)
+          console.error("[MapView] Failed to load raster info:", err);
       });
 
     return () => {
       cancelled = true;
       mapRef.current?.remove();
       mapRef.current = null;
+      tileLayerRef.current = null;
     };
-  }, []);
+  }, [plotBand]);
+
+  // Sync tile layer when plot range changes
+  useEffect(() => {
+    const map = mapRef.current;
+    const oldLayer = tileLayerRef.current;
+    if (!map || !oldLayer) return;
+    map.removeLayer(oldLayer);
+    tileLayerRef.current = L.tileLayer(
+      `/tiles/{z}/{x}/{y}.png?band=${plotBand}&min_val=${plotMin}&max_val=${plotMax}`,
+      {
+        tileSize: 256,
+        minZoom: 2,
+        maxZoom: maxZoomRef.current,
+        noWrap: true,
+        opacity: 1,
+      },
+    ).addTo(map);
+  }, [plotMin, plotMax]); // plotBand changes are handled by the init effect (full rebuild)
 
   // Sync markers whenever points change
   useEffect(() => {

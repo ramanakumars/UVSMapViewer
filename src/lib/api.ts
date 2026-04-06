@@ -16,12 +16,13 @@ export interface RasterInfo {
   pixel_height: number;
   proj4str: string;
   crs_code: string;
+  min_val: number;
   max_val: number;
   resolutions: number[];
 }
 
-export async function fetchRasterInfo(): Promise<RasterInfo> {
-  const res = await fetch("/raster/info");
+export async function fetchRasterInfo(band: string): Promise<RasterInfo> {
+  const res = await fetch(`/raster/info/${band}`);
   if (!res.ok) throw new Error(`Failed to load raster info: HTTP ${res.status}`);
   return res.json();
 }
