@@ -41,3 +41,5 @@ data/
 *.TIFF
 *.tif
 *.fits
+
+src/config.ts

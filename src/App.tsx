@@ -1,46 +1,31 @@
-import { useState, useCallback } from "react";
-import MapView from "./components/MapView";
-import PointsSidebar from "./components/PointsSidebar";
-import type { MapPoint } from "./lib/api";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
-import { RasterContext } from "./contexts/rasterContext";
-import MapController from "./components/MapController";
+import Subject from "./components/Subject";
+import { config } from "./config";
+import panoptesService from "./services/panoptes";
+import { type SubjectInfo } from "./services/interfaces";
+import Login from "./components/Login";
+
+const workflow_id = 31549;
 
 export default function App() {
-  const [points, setPoints] = useState<MapPoint[]>([]);
+  const [subjects, setSubjects] = useState<SubjectInfo[]>([]);
+  const [subject, setSubject] = useState<SubjectInfo | null>(null);
 
-  const handlePointAdded = useCallback((pt: MapPoint) => {
-    setPoints((prev) => [...prev, pt]);
+  useEffect(() => {
+    panoptesService
+      .getSubjects(workflow_id)
+      .then((subjects) => setSubjects(subjects));
   }, []);
 
-  const handleClear = useCallback(() => {
-    setPoints([]);
-  }, []);
+  useEffect(() => {
+    setSubject(subjects[0]);
+  }, [subjects]);
 
-  const [plotBand, setPlotBand] = useState<string>("aggregated");
-  const [rasterMinMax, setRasterMinMax] = useState<Array<number>>([0, 100]);
-  const [plotMin, setPlotMin] = useState<number>(0);
-  const [plotMax, setPlotMax] = useState<number>(100);
   return (
     <div className="app">
-      <PointsSidebar points={points} onClear={handleClear} />
-      <div className="map-container">
-        <RasterContext.Provider
-          value={{
-            plotBand: plotBand,
-            setPlotBand: setPlotBand,
-            rasterMinMax: rasterMinMax,
-            setRasterMinMax: setRasterMinMax,
-            plotMin: plotMin,
-            setPlotMin: setPlotMin,
-            plotMax: plotMax,
-            setPlotMax: setPlotMax,
-          }}
-        >
-          <MapController />
-          <MapView points={points} onPointAdded={handlePointAdded} />
-        </RasterContext.Provider>
-      </div>
+      <Login />
+      <Subject subject={subject} />
     </div>
   );
 }

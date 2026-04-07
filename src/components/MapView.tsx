@@ -3,21 +3,21 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import proj4 from "proj4";
 import "proj4leaflet";
-import { fetchRasterInfo } from "../lib/api";
-import type { MapPoint, RasterInfo } from "../lib/api";
+import { fetchRasterInfo } from "../services/api";
+import type { MapPoint, RasterInfo } from "../services/interfaces";
 import { useRasterContext } from "../contexts/rasterContext";
 
 interface Props {
   points: MapPoint[];
   onPointAdded: (point: MapPoint) => void;
+  plotBand: string;
 }
 
-export default function MapView({ points, onPointAdded }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const markersLayerRef = useRef<L.LayerGroup | null>(null);
-  const tileLayerRef = useRef<L.TileLayer | null>(null);
+export default function MapView({ points, onPointAdded, plotBand }: Props) {
   const maxZoomRef = useRef<number>(10);
+  const mapRef = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const markersLayerRef = useRef<L.LayerGroup | null>(null);
   // Ref so the click handler always uses the latest callback without re-binding
   const onPointAddedRef = useRef(onPointAdded);
   useEffect(() => {
@@ -25,7 +25,7 @@ export default function MapView({ points, onPointAdded }: Props) {
   }, [onPointAdded]);
 
   const {
-    plotBand,
+    perijove,
     setRasterMinMax,
     plotMin,
     setPlotMin,
@@ -34,12 +34,14 @@ export default function MapView({ points, onPointAdded }: Props) {
   } = useRasterContext();
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
     let cancelled = false;
 
-    fetchRasterInfo(plotBand)
+    if(perijove == 0) {
+      return;
+    }
+
+    fetchRasterInfo(perijove, plotBand)
       .then((info: RasterInfo) => {
-        if (cancelled || !containerRef.current) return;
 
         // Register the projection so proj4leaflet can use it
         proj4.defs(info.crs_code, info.proj4str);
@@ -78,7 +80,7 @@ export default function MapView({ points, onPointAdded }: Props) {
           L.latLng(90, 180),
         );
 
-        const map = L.map(containerRef.current!, {
+        const map = L.map(`map_${plotBand}`, {
           crs,
           minZoom: 2,
           maxZoom: info.resolutions.length - 1,
@@ -93,7 +95,7 @@ export default function MapView({ points, onPointAdded }: Props) {
         mapRef.current = map;
 
         maxZoomRef.current = info.resolutions.length - 1;
-        tileLayerRef.current = L.tileLayer(`/tiles/{z}/{x}/{y}.png?band=${plotBand}&min_val=${plotMin}&max_val=${plotMax}`, {
+        tileLayerRef.current = L.tileLayer(`/tiles/{z}/{x}/{y}.png?perijove=${perijove}&band=${plotBand}&min_val=${info.min_val}&max_val=${info.max_val}`, {
           tileSize: 256,
           minZoom: 2,
           maxZoom: info.resolutions.length - 1,
@@ -155,7 +157,7 @@ export default function MapView({ points, onPointAdded }: Props) {
           const { lat, lng } = e.latlng;
           let value: number | null = null;
           try {
-            const res = await fetch(`/raster/pixel?lat=${lat}&lon=${lng}`);
+            const res = await fetch(`/raster/pixel?lat=${lat}&lon=${lng}&perijove=${perijove}`);
             const data = await res.json();
             value = data.value ?? null;
           } catch {
@@ -176,11 +178,14 @@ export default function MapView({ points, onPointAdded }: Props) {
 
     return () => {
       cancelled = true;
-      mapRef.current?.remove();
-      mapRef.current = null;
-      tileLayerRef.current = null;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        tileLayerRef.current = null;
+        markersLayerRef.current = null;
+      }
     };
-  }, [plotBand]);
+  }, [plotBand, perijove]);
 
   // Sync tile layer when plot range changes
   useEffect(() => {
@@ -189,7 +194,7 @@ export default function MapView({ points, onPointAdded }: Props) {
     if (!map || !oldLayer) return;
     map.removeLayer(oldLayer);
     tileLayerRef.current = L.tileLayer(
-      `/tiles/{z}/{x}/{y}.png?band=${plotBand}&min_val=${plotMin}&max_val=${plotMax}`,
+      `/tiles/{z}/{x}/{y}.png?perijove=${perijove}&band=${plotBand}&min_val=${plotMin}&max_val=${plotMax}`,
       {
         tileSize: 256,
         minZoom: 2,
@@ -220,5 +225,5 @@ export default function MapView({ points, onPointAdded }: Props) {
     });
   }, [points]);
 
-  return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
+  return <div id={`map_${plotBand}`}style={{ width: "100%", height: "100%" }} />;
 }

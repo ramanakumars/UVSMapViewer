@@ -14,7 +14,6 @@ In production, also serves the built React app from ../dist/.
 from __future__ import annotations
 
 import io
-import math
 from functools import lru_cache
 from pathlib import Path
 
@@ -28,7 +27,7 @@ from PIL import Image
 from pydantic import BaseModel
 from rasterio.warp import transform as warp_transform
 
-RASTER_PATH = Path(__file__).parent.parent / "data" / "jupiter_aurora_all.tif"
+RASTER_PATH = Path(__file__).parent.parent.parent / "data" / "projected"
 TILE_SIZE = 256
 N_ZOOM = 8
 
@@ -63,14 +62,19 @@ JET_LUT: np.ndarray = _build_lut(_JET_STOPS)
 
 
 @lru_cache(maxsize=4)
-def _raster(band: str) -> dict:
-    with rasterio.open(RASTER_PATH) as src:
+def _raster(perijove: int, band: str) -> dict:
+    raster_path = RASTER_PATH / f"PJ{perijove}" / "jupiter_uv_cube.tif"
+    with rasterio.open(raster_path) as src:
         data = src.read().astype(np.float32)
         tf = src.transform
         crs = src.crs
         nodata = src.nodata
 
     N, H, W = data.shape
+    if nodata is not None:
+        data[data == nodata] = np.nan
+    data[~np.isfinite(data)] = np.nan
+
     if band == "aggregated":
         data = np.nansum(data, axis=0)
     elif band == "colorRatio":
@@ -81,10 +85,6 @@ def _raster(band: str) -> dict:
     pixel_height: float = abs(tf.e)
     xmax = xmin + W * pixel_width
     ymin = ymax - H * pixel_height
-
-    if nodata is not None:
-        data[data == nodata] = np.nan
-    data[~np.isfinite(data)] = np.nan
 
     max_val = float(np.nanmax(data))
     min_val = float(np.nanmin(data) + 1e-10)
@@ -154,7 +154,7 @@ def _apply_colormap(
 
 
 @lru_cache(maxsize=64)
-def _overview(band: str, z: int) -> np.ndarray:
+def _overview(perijove: int, band: str, z: int) -> np.ndarray:
     """
     Return the raster pre-scaled to zoom level z.
 
@@ -162,7 +162,7 @@ def _overview(band: str, z: int) -> np.ndarray:
     and slicing 256×256 tiles directly is much faster than resizing per tile.
     At high zoom the overview equals the original data (no upsampling).
     """
-    r = _raster(band)
+    r = _raster(perijove, band)
     data = r["data"]
     res = r["resolutions"][z]
     ov_w = max(1, round(r["W"] * r["pixel_width"] / res))
@@ -179,11 +179,14 @@ def _overview(band: str, z: int) -> np.ndarray:
         Image.fromarray(filled, mode="F").resize((ov_w, ov_h), Image.BILINEAR)
     )
     # Restore NaN where the majority of source pixels were invalid
-    ov_nan = np.array(
-        Image.fromarray(nan_mask.astype(np.uint8) * 255).resize(
-            (ov_w, ov_h), Image.NEAREST
+    ov_nan = (
+        np.array(
+            Image.fromarray(nan_mask.astype(np.uint8) * 255).resize(
+                (ov_w, ov_h), Image.NEAREST
+            )
         )
-    ) > 127
+        > 127
+    )
     ov[ov_nan] = np.nan
     return ov
 
@@ -202,34 +205,55 @@ def _render_tile(
     z: int,
     tx: int,
     ty: int,
+    perijove: int,
     band: str,
     min_val: float | None = None,
     max_val: float | None = None,
 ) -> bytes:
-    r = _raster(band)
+    r = _raster(perijove, band)
     if min_val is None:
         min_val = r["min_val"]
     if max_val is None:
         max_val = r["max_val"]
 
     lut, scale = _BAND_LUT.get(band, (PLASMA_LUT, "linear"))
-    ov = _overview(band, z)
+    res = r["resolutions"][z]
+    ov = _overview(perijove, band, z)
     ov_h, ov_w = ov.shape
 
-    # Tile (tx, ty) maps directly to a TILE_SIZE×TILE_SIZE slice of the overview
-    c0, r0 = tx * TILE_SIZE, ty * TILE_SIZE
-    c1, r1 = min(ov_w, c0 + TILE_SIZE), min(ov_h, r0 + TILE_SIZE)
+    # The tile coordinate system assumes the overview is ov_w_exp × ov_h_exp pixels.
+    # _overview returns native data (smaller than expected) when no downsampling is
+    # needed, so tile coords must be scaled to the actual overview dimensions.
+    ov_w_exp = max(1, round(r["W"] * r["pixel_width"] / res))
+    ov_h_exp = max(1, round(r["H"] * r["pixel_height"] / res))
+
+    c0 = round(tx * TILE_SIZE * ov_w / ov_w_exp)
+    r0 = round(ty * TILE_SIZE * ov_h / ov_h_exp)
+    c1 = min(ov_w, round((tx + 1) * TILE_SIZE * ov_w / ov_w_exp))
+    r1 = min(ov_h, round((ty + 1) * TILE_SIZE * ov_h / ov_h_exp))
 
     if c0 >= ov_w or r0 >= ov_h:
         img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
     else:
         chunk = ov[r0:r1, c0:c1]
         rgba = _apply_colormap(chunk, min_val, max_val, lut, scale)
-        img = Image.fromarray(rgba, "RGBA")
-        # Only resize when the chunk is smaller than a full tile (edge tiles or
-        # high-zoom where the overview equals the original native resolution)
-        if chunk.shape != (TILE_SIZE, TILE_SIZE):
-            img = img.resize((TILE_SIZE, TILE_SIZE), Image.BILINEAR)
+        chunk_img = Image.fromarray(rgba, "RGBA")
+
+        # How many tile pixels does this chunk represent?
+        tw = min(TILE_SIZE, round((c1 - c0) * ov_w_exp / ov_w))
+        th = min(TILE_SIZE, round((r1 - r0) * ov_h_exp / ov_h))
+
+        if chunk_img.size != (tw, th):
+            # High-zoom: upscale native pixels to fill their tile-pixel area.
+            # Edge tile: chunk is smaller, resize to its proportional tile area.
+            chunk_img = chunk_img.resize((tw, th), Image.NEAREST)
+
+        img = chunk_img
+        # if tw == TILE_SIZE and th == TILE_SIZE:
+        # else:
+        #     # Edge tile: pad remainder with transparency.
+        #     img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
+        #     img.paste(chunk_img, (0, 0))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)
@@ -245,10 +269,12 @@ app = FastAPI(title="UVS Tile Server")
 
 @app.on_event("startup")
 def _warmup() -> None:
+    return
     """Pre-compute all overviews so tile requests are fast from the first hit."""
     for band in _BAND_LUT:
         for z in range(N_ZOOM):
-            _overview(band, z)
+            _overview(5, band, z)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -258,9 +284,9 @@ app.add_middleware(
 )
 
 
-@app.get("/raster/info/{band}")
-def raster_info(band: str):
-    r = _raster(band)
+@app.get("/raster/info")
+def raster_info(perijove: int = Query(...), band: str = Query(...)):
+    r = _raster(perijove, band)
     return {
         "width": r["W"],
         "height": r["H"],
@@ -279,9 +305,11 @@ def raster_info(band: str):
 
 
 @app.get("/raster/pixel")
-def pixel_value(lat: float = Query(...), lon: float = Query(...)):
+def pixel_value(
+    lat: float = Query(...), lon: float = Query(...), perijove: int = Query(...)
+):
     """Return the raster value at a Jupiter geographic lat/lon (degrees)."""
-    r = _raster("aggregated")
+    r = _raster(perijove, "aggregated")
     geo_crs = r["crs"].geodetic_crs
     try:
         xs, ys = warp_transform(geo_crs, r["crs"], [lon], [lat])
@@ -303,14 +331,15 @@ def get_tile(
     z: int,
     x: int,
     y: int,
-    band: str,
+    perijove: int = Query(...),
+    band: str = Query(...),
     min_val: float | None = None,
     max_val: float | None = None,
 ):
     if z < 0 or z >= N_ZOOM:
         raise HTTPException(status_code=404, detail="zoom out of range")
     try:
-        png = _render_tile(z, x, y, band, min_val, max_val)
+        png = _render_tile(z, x, y, perijove, band, min_val, max_val)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return Response(

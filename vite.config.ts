@@ -8,6 +8,13 @@ export default defineConfig({
       "/tiles": "http://localhost:8080",
       "/raster": "http://localhost:8080",
       "/api": "http://localhost:8080",
+      "/zooniverse": {
+        target: "https://www.zooniverse.org",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/zooniverse/, ""),
+        cookieDomainRewrite: { ".zooniverse.org": "localhost" },
+      },
     },
   },
 });

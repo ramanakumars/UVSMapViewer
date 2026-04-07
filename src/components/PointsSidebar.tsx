@@ -1,6 +1,5 @@
 import { useState } from 'react';
-import type { MapPoint } from '../lib/api';
-import { sendPoints } from '../lib/api';
+import type { MapPoint } from '../services/interfaces';
 
 interface Props {
   points: MapPoint[];
@@ -18,7 +17,7 @@ export default function PointsSidebar({ points, onClear }: Props) {
     setStatus('loading');
     setErrorMsg('');
     try {
-      await sendPoints(points);
+      // await sendPoints(points);
       setStatus('success');
       setTimeout(() => setStatus('idle'), 3000);
     } catch (err) {

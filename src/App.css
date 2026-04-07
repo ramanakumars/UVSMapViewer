@@ -1,22 +1,38 @@
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   width: 100%;
   background: #0a0a1a;
   color: #e8e8f0;
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: "Inter", system-ui, sans-serif;
   font-size: 14px;
 }
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
+}
+
+.classifier {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.header-nav {
+  width: 100vh;
+  height: 2rem;
 }
 
 /* ── Sidebar ─────────────────────────────────── */
@@ -144,7 +160,14 @@ button:disabled {
 .legend-gradient {
   height: 10px;
   border-radius: 4px;
-  background: linear-gradient(to right, #0d0887, #7e03a8, #cc4778, #f89540, #f0f921);
+  background: linear-gradient(
+    to right,
+    #0d0887,
+    #7e03a8,
+    #cc4778,
+    #f89540,
+    #f0f921
+  );
   margin-bottom: 4px;
 }
 
