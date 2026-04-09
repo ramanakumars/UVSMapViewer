@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import Subject from "./components/Subject";
-import { config } from "./config";
 import panoptesService from "./services/panoptes";
 import { type SubjectInfo } from "./services/interfaces";
 import Login from "./components/Login";
@@ -24,8 +23,9 @@ export default function App() {
 
   return (
     <div className="app">
-      <Login />
-      <Subject subject={subject} />
+      <Login>
+        <Subject subject={subject} />
+      </Login>
     </div>
   );
 }

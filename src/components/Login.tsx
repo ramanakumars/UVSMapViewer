@@ -3,7 +3,7 @@ import panoptesService from "../services/panoptes";
 import { UserInfo } from "../services/interfaces";
 import { config } from "../config";
 
-export default function Login() {
+export default function Login({ children }: { children: React.ReactElement }) {
   const [authUser, setAuthUser] = useState<UserInfo | null>(null);
   const oauthEnabled =
     config.oauthClientId && config.oauthClientSecret && config.oauthRedirectUri;
@@ -18,24 +18,29 @@ export default function Login() {
       params.delete("code");
       const cleanSearch = params.toString();
       const cleanUrl = "/" + (cleanSearch ? "?" + cleanSearch : "");
-      console.log(cleanUrl);
       window.history.replaceState({}, "", cleanUrl);
 
-      handleOAuthCallback(oauthCode, env).then(() => initialize(env));
+      handleOAuthCallback(oauthCode, env);
       return;
     } else if (oauthEnabled) {
-      initialize(env);
+      if (panoptesService.loadStoredToken()) {
+        panoptesService
+          .getAuthenticatedUser(env)
+          .then((user) => (user ? setAuthUser(user) : null));
+      }
     }
   }, []);
 
   const handleOAuthCallback = async (code: string, env: string) => {
+    console.log("do callback");
     try {
-      await panoptesService.exchangeCodeForToken(code);
-      const user = await panoptesService.getAuthenticatedUser(env);
-      console.log(user);
-      setAuthUser(user?.login || user?.display_name || "authenticated");
+      panoptesService
+        .exchangeCodeForToken(code)
+        .then(() => panoptesService.getAuthenticatedUser(env))
+        .then((user) => (user ? setAuthUser(user) : null));
     } catch (err: any) {
       console.error("OAuth callback failed:", err.message);
+      panoptesService.signOut();
     }
   };
 
@@ -44,55 +49,28 @@ export default function Login() {
     setAuthUser(null);
   };
 
-  const initialize = async (env: any) => {
-    console.log("initializing");
-    if (!panoptesService.isAuthenticated()) {
-      console.log("not authenticated");
-
-      if (panoptesService.loadStoredToken()) {
-        console.log("loaded stored token");
-        try {
-          const user = await panoptesService.getAuthenticatedUser(env);
-          console.log(user);
-          setAuthUser(user?.login || user?.display_name || "authenticated");
-        } catch (err: any) {
-          console.warn("Stored token invalid, clearing:", err.message);
-          panoptesService.signOut();
-        }
-      }
-    }
-
-    if (!panoptesService.isAuthenticated()) {
-      const username = import.meta.env.VITE_PANOPTES_USERNAME;
-      const password = import.meta.env.VITE_PANOPTES_PASSWORD;
-      if (username && password) {
-        try {
-          const { user } = await panoptesService.signIn(username, password);
-          setAuthUser(user?.login || username);
-        } catch (authErr: any) {
-          console.warn(
-            "Auto-auth failed, continuing as anonymous:",
-            authErr.message,
-          );
-        }
-      }
-    }
-  };
-
-  return (
-    <nav className="header-nav">
-      {authUser ? (
-        <button onClick={handleSignOut} className="tab-button">
-          Sign out ({authUser.display_name})
-        </button>
-      ) : oauthEnabled ? (
+  if (authUser) {
+    return (
+      <>
+        <nav className="header-nav">
+          <button onClick={handleSignOut} className="tab-button">
+            Sign out ({authUser.display_name})
+          </button>
+        </nav>
+        {children}
+      </>
+    );
+  } else {
+    return (
+      <div className="sign-in-container">
+        You need to be logged in to use this app!
         <a
           href={panoptesService.getOAuthLoginUrl()}
           className="oauth-login-button"
         >
           Log in with Zooniverse
         </a>
-      ) : null}
-    </nav>
-  );
+      </div>
+    );
+  }
 }

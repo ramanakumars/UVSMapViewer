@@ -112,51 +112,11 @@ export const panoptesService = {
 
   async getAuthenticatedUser(environment = "production") {
     const url = API_URLS[environment] || API_URLS.production;
-    console.log(this.getAuthHeaders());
     const res = await axios.get(`${url}/me`, {
       headers: this.getAuthHeaders(),
     });
+
     return res.data.users?.[0] || null;
-  },
-
-  // ── Password auth (uses Vite proxy for CORS/CSRF) ────────────────
-
-  async signIn(login: string, password: string) {
-    console.log("signing in");
-    const proxy = "/zooniverse";
-    const h = {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    };
-
-    const csrf = await axios.get(`${proxy}/users/sign_in/?now=${Date.now()}`, {
-      headers: h,
-      withCredentials: true,
-    });
-
-    const signIn = await axios.post(
-      `${proxy}/users/sign_in`,
-      { user: { login, password, remember_me: true } },
-      {
-        headers: { ...h, "X-CSRF-Token": csrf.headers["x-csrf-token"] },
-        withCredentials: true,
-      },
-    );
-
-    const token = await axios.post(
-      `${proxy}/oauth/token`,
-      {
-        grant_type: "password",
-        client_id:
-          "f79cf5ea821bb161d8cbb52d061ab9a2321d7cb169007003af66b43f7b79ce2a",
-      },
-      { headers: h, withCredentials: true },
-    );
-
-    bearerToken = token.data.access_token;
-    tokenExpiry = Date.now() + token.data.expires_in * 1000 - 60000;
-
-    return { user: signIn.data, token: bearerToken };
   },
 
   // ── OAuth authorization code flow ────────────────────────────────
@@ -167,7 +127,8 @@ export const panoptesService = {
       response_type: "code",
       client_id: config.oauthClientId,
       redirect_uri: config.oauthRedirectUri,
-      scope: "user project classification subject",
+      //scope: "user project group collection classification subject medium organization translation public",
+      scope: "user project classification subject public",
     });
     return `${base}/oauth/authorize?${params}`;
   },
@@ -175,6 +136,7 @@ export const panoptesService = {
   async exchangeCodeForToken(code: string) {
     // Token exchange goes through the Vite proxy (/zooniverse → www.zooniverse.org)
     // because the /oauth/token endpoint doesn't support CORS.
+    console.log("Exchanging token");
     const res = await axios.post("/zooniverse/oauth/token", {
       grant_type: "authorization_code",
       client_id: config.oauthClientId,
@@ -183,7 +145,6 @@ export const panoptesService = {
       code,
     });
 
-    console.log(res.data);
     this.setToken(res.data.access_token, res.data.expires_in);
     return res.data;
   },
