@@ -1,9 +1,6 @@
 import React, { createContext, useContext } from "react";
 
 interface RasterContextProps {
-  perijove: number;
-  plotBand: string;
-  setPlotBand: (band: string) => void;
   rasterMinMax: number[];
   setRasterMinMax: React.Dispatch<React.SetStateAction<number[]>>;
   plotMin: number;
@@ -13,9 +10,6 @@ interface RasterContextProps {
 }
 
 export const RasterContext = createContext<RasterContextProps>({
-  perijove: 5,
-  plotBand: "aggregated",
-  setPlotBand: () => null,
   rasterMinMax: [0, 100],
   setRasterMinMax: () => null,
   plotMin: 0,

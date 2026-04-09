@@ -55,30 +55,52 @@ def _build_lut(stops: np.ndarray, n: int = 256) -> np.ndarray:
 PLASMA_LUT: np.ndarray = _build_lut(_PLASMA_STOPS)
 JET_LUT: np.ndarray = _build_lut(_JET_STOPS)
 
+_BAND_LUT: dict[str, tuple[np.ndarray, str]] = {
+    "aggregated": (PLASMA_LUT, "log"),
+    "colorRatio": (JET_LUT, "log"),
+}
+
+
+def _band_from_raw(raw: np.ndarray, band: str) -> np.ndarray:
+    """Reduce a (count, H, W) float32 array to a (H, W) band value."""
+    if band == "aggregated":
+        return np.nansum(raw, axis=0)
+    if band == "colorRatio":
+        return np.nansum(raw[10:50], axis=0) / (np.nansum(raw[50:100], axis=0) + 1e-6)
+    return raw[0]
+
 
 # ---------------------------------------------------------------------------
-# Raster loading (cached for the lifetime of the process)
+# Raster metadata (cached — no pixel data retained after first call)
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=4)
-def _raster(perijove: int, band: str) -> dict:
+@lru_cache(maxsize=8)
+def _raster_meta(perijove: int, band: str) -> dict:
+    """
+    Load raster metadata and band statistics.  Pixel data is read once at
+    a low resolution to compute min/max, then discarded — only scalars and
+    projection info are cached.
+    """
     raster_path = RASTER_PATH / f"PJ{perijove}" / "jupiter_uv_cube.tif"
-    with rasterio.open(raster_path) as src:
-        data = src.read().astype(np.float32)
+    aggregated_path = RASTER_PATH / f"PJ{perijove}" / "jupiter_uv_cube.aggregated.tif"
+    with rasterio.open(aggregated_path) as src:
         tf = src.transform
         crs = src.crs
         nodata = src.nodata
+        W, H = src.width, src.height
 
-    N, H, W = data.shape
+        # Read a 256×256 thumbnail to estimate min/max cheaply.
+        thumb = src.read(1 if band == "aggregated" else 1)
+
     if nodata is not None:
-        data[data == nodata] = np.nan
-    data[~np.isfinite(data)] = np.nan
+        thumb[thumb == nodata] = np.nan
+    thumb[~np.isfinite(thumb)] = np.nan
 
-    if band == "aggregated":
-        data = np.nansum(data, axis=0)
-    elif band == "colorRatio":
-        data = np.nansum(data[10:50], axis=0) / (np.nansum(data[50:100], axis=0) + 1e-6)
+    max_val = float(np.nanmax(thumb)) * 1.1
+    min_val = float(np.nanmin(thumb) + 1e-10)
+    del thumb
+
     xmin: float = tf.c
     ymax: float = tf.f
     pixel_width: float = tf.a
@@ -86,21 +108,16 @@ def _raster(perijove: int, band: str) -> dict:
     xmax = xmin + W * pixel_width
     ymin = ymax - H * pixel_height
 
-    max_val = float(np.nanmax(data))
-    min_val = float(np.nanmin(data) + 1e-10)
-
     proj4str: str = crs.to_proj4()
-    # Prefer EPSG code string; fall back to proj4 if unavailable
     epsg = crs.to_epsg()
     crs_code: str = f"EPSG:{epsg}" if epsg else proj4str
 
-    # Resolutions array: zoom 0 = full raster in one tile, each level halves
     extent = max(xmax - xmin, ymax - ymin)
     base_res = extent / TILE_SIZE
     resolutions = [base_res / (2**i) for i in range(N_ZOOM)]
 
     return dict(
-        data=data,
+        path=str(raster_path),
         W=W,
         H=H,
         xmin=xmin,
@@ -112,6 +129,7 @@ def _raster(perijove: int, band: str) -> dict:
         proj4str=proj4str,
         crs_code=crs_code,
         crs=crs,
+        nodata=nodata,
         min_val=min_val,
         max_val=max_val,
         resolutions=resolutions,
@@ -133,7 +151,7 @@ def _apply_colormap(
     """Map a 2-D float array to RGBA using a pre-built 256-entry LUT."""
     H, W = chunk.shape
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
-    valid = np.isfinite(chunk) & (chunk > min_val) & (chunk < max_val)
+    valid = np.isfinite(chunk) & (chunk > min_val)
     if not valid.any():
         return rgba
 
@@ -148,59 +166,7 @@ def _apply_colormap(
     return rgba
 
 
-# ---------------------------------------------------------------------------
-# Per-zoom overview cache (downsampled rasters, computed once per band+zoom)
-# ---------------------------------------------------------------------------
-
-
-@lru_cache(maxsize=64)
-def _overview(perijove: int, band: str, z: int) -> np.ndarray:
-    """
-    Return the raster pre-scaled to zoom level z.
-
-    At low zoom the raster needs heavy downsampling — doing that once here
-    and slicing 256×256 tiles directly is much faster than resizing per tile.
-    At high zoom the overview equals the original data (no upsampling).
-    """
-    r = _raster(perijove, band)
-    data = r["data"]
-    res = r["resolutions"][z]
-    ov_w = max(1, round(r["W"] * r["pixel_width"] / res))
-    ov_h = max(1, round(r["H"] * r["pixel_height"] / res))
-
-    if ov_w >= r["W"] and ov_h >= r["H"]:
-        return data  # native resolution — no upsampling
-
-    # NaN-safe bilinear downsample via PIL mode 'F'
-    nan_mask = ~np.isfinite(data)
-    filled = np.where(nan_mask, 0.0, data).astype(np.float32)
-
-    ov = np.array(
-        Image.fromarray(filled, mode="F").resize((ov_w, ov_h), Image.BILINEAR)
-    )
-    # Restore NaN where the majority of source pixels were invalid
-    ov_nan = (
-        np.array(
-            Image.fromarray(nan_mask.astype(np.uint8) * 255).resize(
-                (ov_w, ov_h), Image.NEAREST
-            )
-        )
-        > 127
-    )
-    ov[ov_nan] = np.nan
-    return ov
-
-
-# ---------------------------------------------------------------------------
-# Tile rendering
-# ---------------------------------------------------------------------------
-
-_BAND_LUT: dict[str, tuple[np.ndarray, str]] = {
-    "aggregated": (PLASMA_LUT, "log"),
-    "colorRatio": (JET_LUT, "log"),
-}
-
-
+@lru_cache(maxsize=8)
 def _render_tile(
     z: int,
     tx: int,
@@ -210,50 +176,69 @@ def _render_tile(
     min_val: float | None = None,
     max_val: float | None = None,
 ) -> bytes:
-    r = _raster(perijove, band)
+    meta = _raster_meta(perijove, band)
     if min_val is None:
-        min_val = r["min_val"]
+        min_val = meta["min_val"]
     if max_val is None:
-        max_val = r["max_val"]
+        max_val = meta["max_val"]
 
     lut, scale = _BAND_LUT.get(band, (PLASMA_LUT, "linear"))
-    res = r["resolutions"][z]
-    ov = _overview(perijove, band, z)
-    ov_h, ov_w = ov.shape
+    res = meta["resolutions"][z]
 
-    # The tile coordinate system assumes the overview is ov_w_exp × ov_h_exp pixels.
-    # _overview returns native data (smaller than expected) when no downsampling is
-    # needed, so tile coords must be scaled to the actual overview dimensions.
-    ov_w_exp = max(1, round(r["W"] * r["pixel_width"] / res))
-    ov_h_exp = max(1, round(r["H"] * r["pixel_height"] / res))
+    # Map tile (tx, ty) → native pixel window.
+    # ov_w_exp is the expected overview width at this zoom; the native raster
+    # has meta["W"] pixels, so scale = W / ov_w_exp converts tile pixels → native pixels.
+    ov_w_exp = max(1, round(meta["W"] * meta["pixel_width"] / res))
+    ov_h_exp = max(1, round(meta["H"] * meta["pixel_height"] / res))
+    scale_x = meta["W"] / ov_w_exp
+    scale_y = meta["H"] / ov_h_exp
 
-    c0 = round(tx * TILE_SIZE * ov_w / ov_w_exp)
-    r0 = round(ty * TILE_SIZE * ov_h / ov_h_exp)
-    c1 = min(ov_w, round((tx + 1) * TILE_SIZE * ov_w / ov_w_exp))
-    r1 = min(ov_h, round((ty + 1) * TILE_SIZE * ov_h / ov_h_exp))
+    c0 = round(tx * TILE_SIZE * scale_x)
+    r0 = round(ty * TILE_SIZE * scale_y)
+    c1 = min(meta["W"], round((tx + 1) * TILE_SIZE * scale_x))
+    r1 = min(meta["H"], round((ty + 1) * TILE_SIZE * scale_y))
 
-    if c0 >= ov_w or r0 >= ov_h:
+    if c0 >= meta["W"] or r0 >= meta["H"] or c1 <= c0 or r1 <= r0:
         img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
     else:
-        chunk = ov[r0:r1, c0:c1]
-        rgba = _apply_colormap(chunk, min_val, max_val, lut, scale)
-        chunk_img = Image.fromarray(rgba, "RGBA")
+        # Tile-pixel dimensions for this window (< TILE_SIZE only for edge tiles).
+        tw = min(TILE_SIZE, max(1, round((c1 - c0) / scale_x)))
+        th = min(TILE_SIZE, max(1, round((r1 - r0) / scale_y)))
 
-        # How many tile pixels does this chunk represent?
-        tw = min(TILE_SIZE, round((c1 - c0) * ov_w_exp / ov_w))
-        th = min(TILE_SIZE, round((r1 - r0) * ov_h_exp / ov_h))
+        window = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
+        with rasterio.open(meta["path"]) as src:
+            # rasterio resamples the window to (tw, th) — handles both
+            # downsampling (low zoom, large window) and upsampling (high zoom).
+            raw = src.read(
+                window=window,
+            )
+        #
+        nodata = meta["nodata"]
+        if nodata is not None:
+            raw[raw == nodata] = np.nan
+        raw[~np.isfinite(raw)] = np.nan
 
-        if chunk_img.size != (tw, th):
-            # High-zoom: upscale native pixels to fill their tile-pixel area.
-            # Edge tile: chunk is smaller, resize to its proportional tile area.
-            chunk_img = chunk_img.resize((tw, th), Image.NEAREST)
+        try:
+            data2d = _band_from_raw(raw, band)
 
-        img = chunk_img
-        # if tw == TILE_SIZE and th == TILE_SIZE:
-        # else:
-        #     # Edge tile: pad remainder with transparency.
-        #     img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
-        #     img.paste(chunk_img, (0, 0))
+            if band == "aggregated":
+                rgba = _apply_colormap(data2d, min_val, max_val, lut, scale)
+            else:
+                print(raw.min(), raw.max(), raw.shape, data2d.min(), data2d.max())
+                rgba = _apply_colormap(data2d, 0, 5, lut, "linear")
+
+            chunk_img = Image.fromarray(rgba, "RGBA").resize(
+                (TILE_SIZE, TILE_SIZE), Image.Resampling.HAMMING
+            )
+
+            if tw < TILE_SIZE or th < TILE_SIZE:
+                img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
+                img.paste(chunk_img, (0, 0))
+            else:
+                img = chunk_img
+        except Exception as e:
+            print(e)
+            raise
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)
@@ -269,11 +254,9 @@ app = FastAPI(title="UVS Tile Server")
 
 @app.on_event("startup")
 def _warmup() -> None:
-    return
-    """Pre-compute all overviews so tile requests are fast from the first hit."""
-    for band in _BAND_LUT:
-        for z in range(N_ZOOM):
-            _overview(5, band, z)
+    """Pre-load metadata so the first tile request doesn't pay the file-open cost."""
+    _raster_meta(3, "aggregated")
+    # _raster_meta(3, "colorRatio")
 
 
 app.add_middleware(
@@ -286,21 +269,21 @@ app.add_middleware(
 
 @app.get("/raster/info")
 def raster_info(perijove: int = Query(...), band: str = Query(...)):
-    r = _raster(perijove, band)
+    m = _raster_meta(perijove, band)
     return {
-        "width": r["W"],
-        "height": r["H"],
-        "xmin": r["xmin"],
-        "xmax": r["xmax"],
-        "ymin": r["ymin"],
-        "ymax": r["ymax"],
-        "pixel_width": r["pixel_width"],
-        "pixel_height": r["pixel_height"],
-        "proj4str": r["proj4str"],
-        "crs_code": r["crs_code"],
-        "max_val": r["max_val"],
-        "min_val": r["min_val"],
-        "resolutions": r["resolutions"],
+        "width": m["W"],
+        "height": m["H"],
+        "xmin": m["xmin"],
+        "xmax": m["xmax"],
+        "ymin": m["ymin"],
+        "ymax": m["ymax"],
+        "pixel_width": m["pixel_width"],
+        "pixel_height": m["pixel_height"],
+        "proj4str": m["proj4str"],
+        "crs_code": m["crs_code"],
+        "max_val": m["max_val"],
+        "min_val": m["min_val"],
+        "resolutions": m["resolutions"],
     }
 
 
@@ -309,19 +292,26 @@ def pixel_value(
     lat: float = Query(...), lon: float = Query(...), perijove: int = Query(...)
 ):
     """Return the raster value at a Jupiter geographic lat/lon (degrees)."""
-    r = _raster(perijove, "aggregated")
-    geo_crs = r["crs"].geodetic_crs
+    m = _raster_meta(perijove, "aggregated")
+    geo_crs = m["crs"].geodetic_crs
     try:
-        xs, ys = warp_transform(geo_crs, r["crs"], [lon], [lat])
+        xs, ys = warp_transform(geo_crs, m["crs"], [lon], [lat])
         x, y = xs[0], ys[0]
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Projection error: {exc}") from exc
 
-    col = round((x - r["xmin"]) / r["pixel_width"])
-    row = round((r["ymax"] - y) / r["pixel_height"])
+    col = round((x - m["xmin"]) / m["pixel_width"])
+    row = round((m["ymax"] - y) / m["pixel_height"])
 
-    if 0 <= row < r["H"] and 0 <= col < r["W"]:
-        v = float(r["data"][row, col])
+    if 0 <= row < m["H"] and 0 <= col < m["W"]:
+        window = rasterio.windows.Window(col, row, 1, 1)
+        with rasterio.open(m["path"]) as src:
+            raw = src.read(window=window).astype(np.float32)
+        nodata = m["nodata"]
+        if nodata is not None:
+            raw[raw == nodata] = np.nan
+        raw[~np.isfinite(raw)] = np.nan
+        v = float(np.nansum(raw))
         return {"value": v if v > 0 else None}
     return {"value": None}
 

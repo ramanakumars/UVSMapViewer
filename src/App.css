@@ -180,7 +180,10 @@ button:disabled {
 
 /* ── Map ─────────────────────────────────────── */
 .map-container {
+  display: flex;
   flex: 1;
+  flex-direction: "row";
+  flex-wrap: nowrap;
   position: relative;
   min-width: 0;
 }
@@ -258,4 +261,14 @@ button:disabled {
   text-align: right;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.sign-in-container {
+  width: 100vw;
+  height: 100vh;
+  margin: auto;
+  font-size: large;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
